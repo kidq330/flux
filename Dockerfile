@@ -3,56 +3,74 @@
 # To run tests:
 # docker build --target=test .
 
-# NOTE: liquid-fixpoint and z3 versions are not pinned,
+# NOTE: liquid-fixpoint version not pinned,
 # watch out for breaking changes
 
-# uses official haskell image containing cabal and stack by default
-ARG FIXPOINT_BUILDER="docker.io/library/haskell:9.10.1-bullseye"
-
 # ARG BASE_IMAGE requirements:
-# - debian-based because it uses apt-get to install z3
 # - cargo is available
 ARG BASE_IMAGE="docker.io/library/rust:1-bookworm"
 
-FROM $FIXPOINT_BUILDER as fixpoint-builder
-WORKDIR /
-
-RUN \
-  git clone --single-branch \
-  https://github.com/ucsd-progsys/liquid-fixpoint.git \
-  && cd /liquid-fixpoint \
-  && cabal update -v \
-  && cabal install
-
 FROM $BASE_IMAGE AS with-deps
 
-COPY --from=fixpoint-builder /root/.local/bin/fixpoint /usr/bin/
+ENV ARCH="x86_64"
 
 RUN \
-  fixpoint --version && \
-  if [ "$(uname -m)" = 'x86_64' ]; then \ 
-    Z3_VERSION="4.13.4" && \
-    ARCH_COMPONENT="x64" && \
-    GLIBC_COMPONENT="2.35"; \
-  else \
-    Z3_VERSION="4.14.0" && \
-    ARCH_COMPONENT="arm64" && \
-    GLIBC_COMPONENT="2.34"; \
-  fi \
-  && ADDR="https://github.com/Z3Prover/z3/releases/download/z3-${Z3_VERSION}/z3-${Z3_VERSION}-${ARCH_COMPONENT}-glibc-${GLIBC_COMPONENT}.zip" \
-  && curl -L -o z3.zip "$ADDR" \
-  && unzip z3.zip -d ~/ && rm z3.zip && ln -s ~/z3*/bin/z3 /usr/bin/z3 \
+  if [ "$(uname -m)" != "$ARCH" ]; then echo "Invalid architecture - this image only supports x86_64" && exit 1; fi \
+  # fetch liquid-fixpoint
+  && NAME="fixpoint-${ARCH}-linux-gnu.tar.gz" \
+  && URL="https://github.com/ucsd-progsys/liquid-fixpoint/releases/download/nightly/${NAME}" \
+  && curl -fsSL --retry 3 -o "$NAME" "$URL" \
+  && tar xzf "$NAME" \
+  && rm "$NAME" \
+  && mv fixpoint /usr/local/bin/ \
+  && fixpoint --version \
+  # fetch z3
+  && Z3_VERSION="4.12.1" \
+  && ARCH_COMPONENT="x64" \
+  && GLIBC_COMPONENT="2.35" \
+
+  && URL="https://github.com/Z3Prover/z3/releases/download/z3-${Z3_VERSION}/z3-${Z3_VERSION}-${ARCH_COMPONENT}-glibc-${GLIBC_COMPONENT}.zip" \
+  && curl -fsSL --retry 3 -o z3.zip "$URL" \
+  && unzip z3.zip -d ~/ \
+  && rm z3.zip \
+  && mv ~/z3*/bin/z3 /usr/local/bin/ \
   && z3 --version
 
 FROM with-deps AS flux-builder
-COPY . /flux
+
+# Don't copy everything like docs etc unless they affect the build
+COPY ./.cargo /flux/.cargo
+COPY ./Cargo.lock /flux/Cargo.lock
+COPY ./Cargo.toml /flux/Cargo.toml
+COPY ./clippy.toml /flux/clippy.toml
+COPY ./crates /flux/crates
+COPY ./lib /flux/lib
+COPY ./rust-toolchain.toml /flux/rust-toolchain.toml
+COPY ./tools /flux/tools
+COPY ./typos.toml /flux/typos.toml
+COPY ./xtask /flux/xtask
+
+# test
+COPY ./tests /flux/tests
+
+# dev
+COPY ./backtracetk.toml /flux/backtracetk.toml 
+COPY ./rustfmt.toml /flux/rustfmt.toml
+# COPY . /flux
+
 WORKDIR /flux
-RUN cargo xtask install
+RUN \
+  fixpoint --version \
+  && z3 --version \
+  && cargo xtask install
 
 FROM flux-builder AS test
 
 WORKDIR /flux
-RUN cargo xtask test
+RUN \
+  fixpoint --version \
+  && z3 --version \
+  && cargo xtask test
 
 # To have flux source available from inside the container, one can substitute `with-deps` with `flux-builder`,
 # but if you want the changes to persist across containers (which is what's usually desired),
